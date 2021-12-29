@@ -3,12 +3,6 @@
 from vyper.interfaces import ERC20
 
 
-interface ERC20:
-    def transfer(_to: address, _value: uint256) -> bool: nonpayable
-    def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
-    def decimals() -> uint256: view
-    def balanceOf(_user: address) -> uint256: view
-
 interface StableSwap:
     def get_dy(i: int128, j: int128, dx: uint256) -> uint256: view
 
@@ -37,6 +31,10 @@ event OraclePriceUpdate:
 event UpdateSwapQuantity:
     _new_quantity: uint256
 
+event UpdateOracleMinFrequency:
+    _old_freq: uint256
+    _new_freq: uint256
+
 event UpdateRewardRate:
     _token_address: indexed(address)
     _old_rate: uint256
@@ -58,44 +56,48 @@ event ClaimReward:
     _oracle_token: indexed(address)
 
 
-WETH_ADDRESS: address = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
-DEFAULT_REWARD_RATE: uint256 = 0
-DEFAULT_SWAP_QUANTITY: uint256 = 1000 * 1E18
-MAX_STORED_RATES: int128 = 100
-DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: int128 = 86400
+WETH_ADDRESS: constant(address) = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+DEFAULT_REWARD_RATE: constant(uint256) = 0
+DEFAULT_SWAP_QUANTITY: constant(uint256) = 1000000000000000000000
+MAX_STORED_RATES: constant(uint256) = 100
+DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: constant(int128) = 86400
 
 admin: public(address)
 transfer_ownership_deadline: public(uint256)
 future_admin: public(address)
-is_paused: bool = False
+is_paused: bool
 
 name: public(String[32])
 token_ticker: public(String[32])
-rate: public(uint256)
-swap_rates: uint256[100]  # 100 length array
-filled_indices: int128 = 0
-append_to_index: int128 = 0
-max_index: int128
+reward_rate: public(uint256)
+
+swap_quantity: uint256
+swap_rates: HashMap[uint256, uint256]
+filled_indices: uint256
+append_to_index: uint256
 curve_pool_address: address
 chainlink_oracle: address
 chainlink_price: uint256
 average_swap_rate: uint256
 latest_oracle_price: uint256
+oracle_update_epoch: uint256
+min_oracle_update_time_seconds: uint256
 
 
 @external
 def __init__(
-    _name: String[64], 
+    _name: String[32], 
     _token_ticker: String[32], 
     _curve_pool: address, 
-    _chainlink_oracle: address
+    _chainlink_oracle: address,
     _init_chainlink_price: uint256,
-    _init_oracle_update_epoch: int128
+    _init_oracle_update_epoch: uint256
 ):
 
     self.admin = msg.sender
-    log SetAdmin(ZERO_ADDRESS, _admin)
+    log NewAdmin(msg.sender)
     self.name = _name
+    self.is_paused = False
 
     # bounty settings
     self.token_ticker = _token_ticker
@@ -108,19 +110,18 @@ def __init__(
     self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
     self.chainlink_price = _init_chainlink_price
     self.latest_oracle_price = _init_chainlink_price
-    self.average_swap_rate = 1E18
+    self.average_swap_rate = 1000000000000000000  # 1E18
     self.oracle_update_epoch = 0  # keeping it zero so oracle update can be called without waiting
+
+    self.filled_indices = 0
+    self.append_to_index = 0
 
 
 # deposit and update bounty rates
 @external
 @nonreentrant('lock')
 def deposit_bounty(_token_address: address, _amount: uint256):
-    """
-    @notice
-    @dev
-    @param
-    """
+
     assert not self.is_paused  # cannot deposit if paused
     assert _token_address == WETH_ADDRESS  # can only deposit weth
     assert _amount > 0
@@ -134,22 +135,14 @@ def deposit_bounty(_token_address: address, _amount: uint256):
 @internal
 @payable
 def _reward_bounty(_receiver_address: address):
-    """
-    @notice
-    @dev
-    @param
-    """
+
     ERC20(WETH_ADDRESS).transferFrom(self, _receiver_address, self.reward_rate)
 
 
 # code for calculating the oracle price of the curve pool asset
 @external
 def set_pool_swap_quantity(_quantity: uint256) -> bool:
-    """
-    @notice
-    @dev
-    @param
-    """
+
     assert msg.sender == self.admin  # admin only
     self.swap_quantity = _quantity
     log UpdateSwapQuantity(_quantity)
@@ -157,25 +150,19 @@ def set_pool_swap_quantity(_quantity: uint256) -> bool:
 
 
 @external
-def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: int128) -> bool:
-    """
-    @notice
-    @dev
-    @param
-    """
+def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: uint256) -> bool:
+
     assert msg.sender == self.admin  # admin only2
+
+    log UpdateOracleMinFrequency(self.min_oracle_update_time_seconds, _new_oracle_update_min_freq_in_seconds)
     self.min_oracle_update_time_seconds = _new_oracle_update_min_freq_in_seconds
-    log UpdateSwapQuantity(_quantity)
+    
     return True
 
 
 @internal
-def _get_swap_rates() -> uint256[MAX_STORED_RATES]:
-    """
-    @notice
-    @dev
-    @param
-    """
+def _get_swap_rates():
+
     # if append to index equals max stored rates, go back to 0 (earliest entry)
     # and overwrite it. This is for generating a rolling window such that once
     # MAX_STORED_RATES values are filled, we want to start replacing the older
@@ -183,33 +170,29 @@ def _get_swap_rates() -> uint256[MAX_STORED_RATES]:
     if self.append_to_index == MAX_STORED_RATES:
         self.append_to_index = 0
 
-    # append cvxcrv:crv swap rate to swap_rates array.
-    self.swap_rate[self.append_to_index]: uint256 = StableSwap(self.curve_pool_address).get_dy(1, 0, self.swap_quantity) / self.swap_quantity
+    # append cvxcrv:crv swap rate to swap_rates array. coin_index 0 is CRV, coin_index 1 is cvxCRV. 
+    # We are interested in swaps from cvxCRV to CRV
+    self.swap_rates[self.append_to_index] = StableSwap(self.curve_pool_address).get_dy(1, 0, self.swap_quantity) / self.swap_quantity
     
     # the filled indices tracks how much of the array is already filled. This helps
     # with averaging
     if self.filled_indices < MAX_STORED_RATES:
-        self.filled_indices += 1
-        self.append_to_index += 1
-    
-    return self.swap_rate
+        self.filled_indices = self.filled_indices + 1
+        self.append_to_index = self.append_to_index + 1
 
 
 @external
 def update_oracle() -> uint256:
-    """
-    @notice
-    @dev
-    @param
-    """
+
     # add logic for ensuring that the oracle does not get updated more than once every minute:
-    assert block.timestamp - self.oracle_update_epoch > self.min_oracle_update_time_seconds
+    if block.timestamp - self.oracle_update_epoch > self.min_oracle_update_time_seconds:
+        return self.latest_oracle_price
 
     # get swap rates array and average swap rate:
-    _swap_rates: uint[self.filled_indices] = self._get_swap_rates()[:self.filled_indices]
+    self._get_swap_rates()
     _sum_swap_rates: uint256 = 0
-    for i in range(self.filled_indices):
-        _sum_swap_rates += _swap_rates[i]
+    for i in range(MAX_STORED_RATES):
+        _sum_swap_rates += self.swap_rates[i]
     
     self.average_swap_rate = _sum_swap_rates / self.filled_indices
 
@@ -217,12 +200,12 @@ def update_oracle() -> uint256:
     self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice()
     
     # oracle price is:
-    _latest_oracle_price = self.chainlink_price * self.average_swap_rate
+    _latest_oracle_price: uint256 = self.chainlink_price * self.average_swap_rate
     self.latest_oracle_price = _latest_oracle_price
 
     # update oracle epoch and log price
     self.oracle_update_epoch = block.timestamp
-    log OraclePriceUpdate(self.chainlink_oracle, self.average_swap_rate, _latest_oracle_price)
+    log OraclePriceUpdate(self.chainlink_price, self.average_swap_rate, _latest_oracle_price)
 
     # reward bounty to oracle update caller
     self._reward_bounty(msg.sender)
@@ -233,22 +216,14 @@ def update_oracle() -> uint256:
 @external
 @view
 def getLatestPrice() -> uint256:
-    """
-    @notice
-    @dev
-    @param
-    """
+
     return self.latest_oracle_price
 
 
 # admin methods:
 @external
 def pause() -> bool:
-    """
-    @notice
-    @dev
-    @param
-    """
+
     assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = True
 
@@ -257,11 +232,7 @@ def pause() -> bool:
 
 @external
 def unpause() -> bool:
-    """
-    @notice
-    @dev
-    @param
-    """
+
     assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = False
 
