@@ -3,3 +3,4 @@ eth-brownie
 brownie-token-tester
 py-etherscan-api
 web3
+vyper
