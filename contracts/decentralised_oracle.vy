@@ -58,12 +58,6 @@ event ClaimReward:
     _oracle_token: indexed(address)
 
 
-struct BountyTokenInfo:
-    rate: uint256
-    is_whitelisted: bool
-    verified_depositor: address
-
-
 WETH_ADDRESS: address = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 DEFAULT_REWARD_RATE: uint256 = 0
 DEFAULT_SWAP_QUANTITY: uint256 = 1000 * 1E18
