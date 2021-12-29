@@ -10,14 +10,10 @@ interface ERC20:
     def balanceOf(_user: address) -> uint256: view
 
 interface StableSwap:
-    def coins(i: uint256) -> address: view
     def get_dy(i: int128, j: int128, dx: uint256) -> uint256: view
-    def calc_token_amount(amounts: uint256[N_STABLECOINS], is_deposit: bool) -> uint256: view
-    def calc_withdraw_one_coin(token_amount: uint256, i: int128) -> uint256: view
-    def add_liquidity(amounts: uint256[N_STABLECOINS], min_mint_amount: uint256): nonpayable
-    def remove_liquidity_one_coin(token_amount: uint256, i: int128, min_amount: uint256): nonpayable
-    def remove_liquidity(amount: uint256, min_amounts: uint256[N_STABLECOINS]): nonpayable
-    def get_virtual_price() -> uint256: view
+
+interface ChainlinkOracle:
+    def getLatestPrice() -> uint256: view
 
 
 event CommitNewAdmin:
@@ -31,6 +27,15 @@ event SetOracle:
     _token_address: indexed(address)
     _curve_pool_address: indexed(address)
     _chainlink_oracle_address: indexed(address)
+    _swap_quantity: uint256
+
+event OraclePriceUpdate:
+    _chainlink_price: uint256
+    _average_pool_swap_rate: uint256
+    _oracle_price: uint256
+
+event UpdateSwapQuantity:
+    _new_quantity: uint256
 
 event UpdateRewardRate:
     _token_address: indexed(address)
@@ -52,11 +57,6 @@ event ClaimReward:
     _amount: uint256
     _oracle_token: indexed(address)
 
-event UpdateOracle:
-    _oracle_keeper: indexed(address)
-    _oracle_token_address: indexed(address)
-    _oracle_price: uint256
-
 
 struct BountyTokenInfo:
     rate: uint256
@@ -66,8 +66,9 @@ struct BountyTokenInfo:
 
 WETH_ADDRESS: address = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 DEFAULT_REWARD_RATE: uint256 = 0
-cvxCRV_CURVE_POOL_INDEX: int128 = 1
-CRV_CURVE_POOL_INDEX: int128 = 0
+DEFAULT_SWAP_QUANTITY: uint256 = 1000 * 1E18
+MAX_STORED_RATES: int128 = 100
+DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: int128 = 86400
 
 admin: public(address)
 transfer_ownership_deadline: public(uint256)
@@ -75,22 +76,45 @@ future_admin: public(address)
 
 name: public(String[32])
 token_ticker: public(String[32])
+rate: public(uint256)
+swap_rates: uint256[100]  # 100 length array
+filled_indices: int128 = 0
+append_to_index: int128 = 0
+max_index: int128
 curve_pool_address: address
 chainlink_oracle: address
+chainlink_price: uint256
+average_swap_rate: uint256
+latest_oracle_price: uint256
 
 
 @external
-def __init__(_name: String[64], _token_ticker: String[32], _curve_pool: address, _chainlink_oracle: address):
+def __init__(
+    _name: String[64], 
+    _token_ticker: String[32], 
+    _curve_pool: address, 
+    _chainlink_oracle: address
+    _init_chainlink_price: uint256,
+    _init_oracle_update_epoch: int128
+):
 
     self.admin = msg.sender
     log SetAdmin(ZERO_ADDRESS, _admin)
-
     self.name = _name
+
+    # bounty settings
     self.token_ticker = _token_ticker
     self.rate = DEFAULT_REWARD_RATE
-
+    
+    # oracle settings
     self.curve_pool_address = _curve_pool
     self.chainlink_oracle = _chainlink_oracle
+    self.swap_quantity = DEFAULT_SWAP_QUANTITY
+    self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
+    self.chainlink_price = _init_chainlink_price
+    self.latest_oracle_price = _init_chainlink_price
+    self.average_swap_rate = 1E18
+    self.oracle_update_epoch = block.timestamp
 
 
 # deposit and update bounty rates
@@ -113,7 +137,7 @@ def deposit_bounty(_token_address: address, _amount: uint256):
 
 # code for receiving bounty: you get a higher bounty the closer you are to every 5th minute:
 @external
-def reward_bounty():
+def reward_bounty(_receiver_address: address):
     """
     @notice This module rewards a bounty to the oracle update caller, 
     which is at its max (== self.rate) when it is close to a 5 minute interval, 
@@ -123,10 +147,36 @@ def reward_bounty():
     @dev
     @param
     """
+    #TODO: set logic for bounty rewards
     pass
 
 
 # code for calculating the oracle price of the curve pool asset
+@external
+def set_pool_swap_quantity(_quantity: uint256):
+    """
+    @notice
+    @dev
+    @param
+    """
+    assert msg.sender == self.admin  # admin only
+    self.swap_quantity = _quantity
+    log UpdateSwapQuantity(_quantity)
+
+
+@external
+def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: int128):
+    """
+    @notice
+    @dev
+    @param
+    """
+    assert msg.sender == self.admin  # admin only2
+    self.min_oracle_update_time_seconds = _new_oracle_update_min_freq_in_seconds
+    log UpdateSwapQuantity(_quantity)
+
+
+
 @internal
 def _get_swap_rates():
     """
@@ -134,24 +184,23 @@ def _get_swap_rates():
     @dev
     @param
     """
+    # if append to index equals max stored rates, go back to 0 (earliest entry)
+    # and overwrite it. This is for generating a rolling window such that once
+    # MAX_STORED_RATES values are filled, we want to start replacing the older
+    # swap_rates with newer rates.
+    if self.append_to_index == MAX_STORED_RATES:
+        self.append_to_index = 0
 
-    return StableSwap()
-
-
-@internal
-def _get_median_swap_rate(i: int128, j: int128):
-    """
-    @notice
-    @dev
-    @param
-    """
-
-    swap_rates: uint256[5]
-    for i in range(5):
-        amount_swapped: uint256 = 10 ** i * 1E18
-        swap_rates[i] = StableSwap(self.curve_pool_address).get_dy(1, 0, amount_swapped) / amount_swapped
-
-    return StableSwap()
+    # append cvxcrv:crv swap rate to swap_rates array.
+    self.swap_rate[self.append_to_index]: uint256 = StableSwap(self.curve_pool_address).get_dy(1, 0, self.swap_quantity) / self.swap_quantity
+    
+    # the filled indices tracks how much of the array is already filled. This helps
+    # with averaging
+    if self.filled_indices < MAX_STORED_RATES:
+        self.filled_indices += 1
+        self.append_to_index += 1
+    
+    return self.swap_rate
 
 
 @external
@@ -161,18 +210,33 @@ def update_oracle():
     @dev
     @param
     """
-    pass
+    # add logic for ensuring that the oracle does not get updated more than once every minute:
+    assert block.timestamp - self.last_update_timestamp > self.min_oracle_update_time_seconds
+
+    # get swap rates array and average swap rate:
+    swap_rates: uint[self.filled_indices] = self._get_swap_rates()[:self.filled_indices]
+    self.average_swap_rate = 123  # TODO: calculate average
+
+    # get and store chainlink price:
+    self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice()
+    
+    # oracle price is:
+    self.latest_oracle_price = self.chainlink_price * self.average_swap_rate
+
+    # update oracle epoch and log price
+    self.oracle_update_epoch = block.timestamp
+    log OraclePriceUpdate(self.chainlink_oracle, self.average_swap_rate, self._latest_price)
 
 
 @external
 @view
-def get_updated_price():
+def getLatestPrice():
     """
     @notice
     @dev
     @param
     """
-    pass
+    return self.latest_oracle_price
 
 
 # admin methods:
