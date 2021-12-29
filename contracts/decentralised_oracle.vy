@@ -67,6 +67,7 @@ DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: int128 = 86400
 admin: public(address)
 transfer_ownership_deadline: public(uint256)
 future_admin: public(address)
+is_paused: bool = False
 
 name: public(String[32])
 token_ticker: public(String[32])
@@ -98,7 +99,7 @@ def __init__(
 
     # bounty settings
     self.token_ticker = _token_ticker
-    self.rate = DEFAULT_REWARD_RATE
+    self.reward_rate = DEFAULT_REWARD_RATE
     
     # oracle settings
     self.curve_pool_address = _curve_pool
@@ -108,7 +109,7 @@ def __init__(
     self.chainlink_price = _init_chainlink_price
     self.latest_oracle_price = _init_chainlink_price
     self.average_swap_rate = 1E18
-    self.oracle_update_epoch = block.timestamp
+    self.oracle_update_epoch = 0  # keeping it zero so oracle update can be called without waiting
 
 
 # deposit and update bounty rates
@@ -130,19 +131,15 @@ def deposit_bounty(_token_address: address, _amount: uint256):
 
 
 # code for receiving bounty: you get a higher bounty the closer you are to every 5th minute:
-@external
-def reward_bounty(_receiver_address: address):
+@internal
+@payable
+def _reward_bounty(_receiver_address: address):
     """
-    @notice This module rewards a bounty to the oracle update caller, 
-    which is at its max (== self.rate) when it is close to a 5 minute interval, 
-    and decays exponentially the farther you get from it until 4 minutes past, 
-    and recovers exponentially from 4 minutes and onwards until the closer you 
-    get to the 5 minute interval, rinse, repeat.
+    @notice
     @dev
     @param
     """
-    #TODO: set logic for bounty rewards
-    pass
+    ERC20(WETH_ADDRESS).transferFrom(self, _receiver_address, self.reward_rate)
 
 
 # code for calculating the oracle price of the curve pool asset
@@ -205,11 +202,15 @@ def update_oracle():
     @param
     """
     # add logic for ensuring that the oracle does not get updated more than once every minute:
-    assert block.timestamp - self.last_update_timestamp > self.min_oracle_update_time_seconds
+    assert block.timestamp - self.oracle_update_epoch > self.min_oracle_update_time_seconds
 
     # get swap rates array and average swap rate:
-    swap_rates: uint[self.filled_indices] = self._get_swap_rates()[:self.filled_indices]
-    self.average_swap_rate = 123  # TODO: calculate average
+    _swap_rates: uint[self.filled_indices] = self._get_swap_rates()[:self.filled_indices]
+    _sum_swap_rates: uint256 = 0
+    for i in range(self.filled_indices):
+        _sum_swap_rates += _swap_rates[i]
+    
+    self.average_swap_rate = _sum_swap_rates / self.filled_indices
 
     # get and store chainlink price:
     self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice()
@@ -220,6 +221,9 @@ def update_oracle():
     # update oracle epoch and log price
     self.oracle_update_epoch = block.timestamp
     log OraclePriceUpdate(self.chainlink_oracle, self.average_swap_rate, self._latest_price)
+
+    # reward bounty to oracle update caller
+    self._reward_bounty(msg.sender)
 
 
 @external
@@ -235,7 +239,7 @@ def getLatestPrice():
 
 # admin methods:
 @external
-def pause():
+def pause() ->:
     """
     @notice
     @dev
@@ -244,9 +248,11 @@ def pause():
     assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = True
 
+    return True
+
 
 @external
-def unpause():
+def unpause() -> bool:
     """
     @notice
     @dev
@@ -254,6 +260,8 @@ def unpause():
     """
     assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = False
+
+    return True
 
 
 # copied/inspired from: https://etherscan.deth.net/address/0x0000000022d53366457f9d5e68ec105046fc4383
