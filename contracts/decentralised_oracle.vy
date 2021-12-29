@@ -1,14 +1,23 @@
+# @version 0.3.1
+
 from vyper.interfaces import ERC20
 
-
-interface DecentralisedOracle:
-    def owner(): -> address: view
 
 interface ERC20:
     def transfer(_to: address, _value: uint256) -> bool: nonpayable
     def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
     def decimals() -> uint256: view
     def balanceOf(_user: address) -> uint256: view
+
+interface StableSwap:
+    def coins(i: uint256) -> address: view
+    def get_dy(i: int128, j: int128, dx: uint256) -> uint256: view
+    def calc_token_amount(amounts: uint256[N_STABLECOINS], is_deposit: bool) -> uint256: view
+    def calc_withdraw_one_coin(token_amount: uint256, i: int128) -> uint256: view
+    def add_liquidity(amounts: uint256[N_STABLECOINS], min_mint_amount: uint256): nonpayable
+    def remove_liquidity_one_coin(token_amount: uint256, i: int128, min_amount: uint256): nonpayable
+    def remove_liquidity(amount: uint256, min_amounts: uint256[N_STABLECOINS]): nonpayable
+    def get_virtual_price() -> uint256: view
 
 
 event CommitNewAdmin:
@@ -28,12 +37,14 @@ event UpdateRewardRate:
     _old_rate: uint256
     _new_rate: uint256
 
-event DepositReward:
+event NewVerifiedDepositor:
+    _token_address: indexed(address)
+    _old_depositor_address: indexed(address)
+    _new_depositor_address: indexed(address)
+
+event DepositBounty:
     _depositor: indexed(address)
-    _bounty_token: indexed(address)
     _amount: uint256
-    _reward_rate: uint256
-    _oracle_token: uint256
 
 event ClaimReward:
     _receiver: indexed(address)
@@ -53,136 +64,94 @@ struct BountyTokenInfo:
     verified_depositor: address
 
 
+WETH_ADDRESS: address = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+DEFAULT_REWARD_RATE: uint256 = 0
+cvxCRV_CURVE_POOL_INDEX: int128 = 1
+CRV_CURVE_POOL_INDEX: int128 = 0
+
 admin: public(address)
+transfer_ownership_deadline: public(uint256)
+future_admin: public(address)
+
 name: public(String[32])
 token_ticker: public(String[32])
-bounty_tokens: HashMap[address, BountyTokenInfo]
-bounty_token_id: HashMap[uint256, address]
-next_bounty_token_id: uint256 = 0
-DEFAULT_REWARD_RATE: uint256 = 0
+curve_pool_address: address
+chainlink_oracle: address
 
 
 @external
-def __init__(_name: String[64], _token_ticker: String[32]):
+def __init__(_name: String[64], _token_ticker: String[32], _curve_pool: address, _chainlink_oracle: address):
 
     self.admin = msg.sender
     log SetAdmin(ZERO_ADDRESS, _admin)
 
     self.name = _name
     self.token_ticker = _token_ticker
+    self.rate = DEFAULT_REWARD_RATE
+
+    self.curve_pool_address = _curve_pool
+    self.chainlink_oracle = _chainlink_oracle
 
 
+# deposit and update bounty rates
 @external
-def add_bounty_token(_token_address: address, _verified_depositor_address: address, _rate: utin256):
+@nonreentrant('lock')
+def deposit_bounty(_token_address: address, _amount: uint256):
     """
     @notice
     @dev
     @param
     """
-    assert msg.sender == self.admin
-    self.bounty_tokens[_token_address] = BountyTokenInfo(
-        {
-            rate: _rate,
-            is_whitelisted: True,
-            verified_depositor: _verified_depositor_address
-        }
-    )
-    self.bounty_token_id[self.next_bounty_token_id] = _token_address
-    self.next_bounty_token_id += 1
-
-
-@external
-def whitelist_bounty_token(_token_address: address):
-    """
-    @notice
-    @dev
-    @param
-    """
-    assert msg.sender == self.admin
-    self.bounty_tokens[_token_address].is_whitelisted = True
-
-
-@external
-def blacklist_bounty_token(_token_address: address):
-    """
-    @notice
-    @dev
-    @param
-    """
-    assert msg.sender == self.admin
-    self.bounty_tokens[_token_address].is_whitelisted = False
-
-
-@external
-@view
-def is_whitelisted(_token_address):
-    """
-    @notice
-    @dev
-    @param
-    """
-    return self.bounty_tokens[_token_address].is_whitelisted
-
-
-@external
-def change_verified_depositor(_token_address: address, _new_verified_depositor: address):
-    """
-    @notice The admin can change the verified depositor.
-    @dev
-    @param
-    """
-    assert msg.sender == self.admin
-
-
-@external
-@payable
-def deposit_bounty(_token_address: address, _amount: uint256, _rate: uint256):
-    """
-    Todo:
-    1. ensure that the deposit token is whitelisted
-    2.
-    """
-    assert self.bounty_tokens[_token_address].is_whitelisted
-    assert msg.sender == self.bounty_tokens[_token_address].verified_depositor  # only verified depositors may deposit
     assert not self.is_paused  # cannot deposit if paused
+    assert _token_address == WETH_ADDRESS  # can only deposit weth
+    assert _amount > 0
 
-    ERC20(_token_address).transferFrom(msg.sender, self, _amount)
+    assert ERC20(_token_address).transferFrom(msg.sender, self, _amount)
 
-    log UpdateRewardRate(_token_address, self.bounty_tokens[_token_address].rate, _rate)
-    self.bounty_tokens[_token_address] = _rate
+    log DepositBounty(msg.sender, _amount)
 
 
+# code for receiving bounty: you get a higher bounty the closer you are to every 5th minute:
 @external
-def set_reward_rate(_token_address: address, _new_rate: uint256):
+def reward_bounty():
     """
-    @notice
-    @dev
-    @param
-    """
-    assert msg.sender == self.admin  # only the admin can change the reward rate
-
-    log UpdateRewardRate(_token_address, self.bounty_tokens[_token_address].rate, _new_rate)
-    self.bounty_tokens[_token_address].rate = _new_rate
-
-
-@external
-def receive_bounty():
-    """
-    @notice
+    @notice This module rewards a bounty to the oracle update caller, 
+    which is at its max (== self.rate) when it is close to a 5 minute interval, 
+    and decays exponentially the farther you get from it until 4 minutes past, 
+    and recovers exponentially from 4 minutes and onwards until the closer you 
+    get to the 5 minute interval, rinse, repeat.
     @dev
     @param
     """
     pass
 
 
-@external():
-def set_oracle():
+# code for calculating the oracle price of the curve pool asset
+@internal
+def _get_swap_rates():
     """
     @notice
     @dev
     @param
     """
-    pass
+
+    return StableSwap()
+
+
+@internal
+def _get_median_swap_rate(i: int128, j: int128):
+    """
+    @notice
+    @dev
+    @param
+    """
+
+    swap_rates: uint256[5]
+    for i in range(5):
+        amount_swapped: uint256 = 10 ** i * 1E18
+        swap_rates[i] = StableSwap(self.curve_pool_address).get_dy(1, 0, amount_swapped) / amount_swapped
+
+    return StableSwap()
 
 
 @external
@@ -195,15 +164,18 @@ def update_oracle():
     pass
 
 
-@view
 @external
-def version() -> String[8]:
+@view
+def get_updated_price():
     """
-    @notice Get the version of this contract
+    @notice
+    @dev
+    @param
     """
-    return VERSION
+    pass
 
 
+# admin methods:
 @external
 def pause():
     """
@@ -211,7 +183,7 @@ def pause():
     @dev
     @param
     """
-    assert msg.sender == self.admin
+    assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = True
 
 
@@ -222,7 +194,7 @@ def unpause():
     @dev
     @param
     """
-    assert msg.sender == self.admin
+    assert msg.sender == self.admin  # dev: admin-only function
     self.is_paused = False
 
 
