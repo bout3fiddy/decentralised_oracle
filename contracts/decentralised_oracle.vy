@@ -144,7 +144,7 @@ def _reward_bounty(_receiver_address: address):
 
 # code for calculating the oracle price of the curve pool asset
 @external
-def set_pool_swap_quantity(_quantity: uint256):
+def set_pool_swap_quantity(_quantity: uint256) -> bool:
     """
     @notice
     @dev
@@ -153,10 +153,11 @@ def set_pool_swap_quantity(_quantity: uint256):
     assert msg.sender == self.admin  # admin only
     self.swap_quantity = _quantity
     log UpdateSwapQuantity(_quantity)
+    return True
 
 
 @external
-def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: int128):
+def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: int128) -> bool:
     """
     @notice
     @dev
@@ -165,11 +166,11 @@ def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: int1
     assert msg.sender == self.admin  # admin only2
     self.min_oracle_update_time_seconds = _new_oracle_update_min_freq_in_seconds
     log UpdateSwapQuantity(_quantity)
-
+    return True
 
 
 @internal
-def _get_swap_rates():
+def _get_swap_rates() -> uint256[MAX_STORED_RATES]:
     """
     @notice
     @dev
@@ -195,7 +196,7 @@ def _get_swap_rates():
 
 
 @external
-def update_oracle():
+def update_oracle() -> uint256:
     """
     @notice
     @dev
@@ -216,19 +217,22 @@ def update_oracle():
     self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice()
     
     # oracle price is:
-    self.latest_oracle_price = self.chainlink_price * self.average_swap_rate
+    _latest_oracle_price = self.chainlink_price * self.average_swap_rate
+    self.latest_oracle_price = _latest_oracle_price
 
     # update oracle epoch and log price
     self.oracle_update_epoch = block.timestamp
-    log OraclePriceUpdate(self.chainlink_oracle, self.average_swap_rate, self._latest_price)
+    log OraclePriceUpdate(self.chainlink_oracle, self.average_swap_rate, _latest_oracle_price)
 
     # reward bounty to oracle update caller
     self._reward_bounty(msg.sender)
 
+    return _latest_oracle_price
+
 
 @external
 @view
-def getLatestPrice():
+def getLatestPrice() -> uint256:
     """
     @notice
     @dev
@@ -239,7 +243,7 @@ def getLatestPrice():
 
 # admin methods:
 @external
-def pause() ->:
+def pause() -> bool:
     """
     @notice
     @dev
