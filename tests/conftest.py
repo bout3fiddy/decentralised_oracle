@@ -1,3 +1,4 @@
+from brownie.network import contract
 import pytest
 from brownie_tokens import MintableForkToken
 
@@ -21,7 +22,7 @@ def charlie(accounts):
 
 
 @pytest.fixture(scope="module")
-def decentralised_oracle(decentralised_oracle, alice):
+def deployed_oracle(decentralised_oracle, alice):
     oracle = decentralised_oracle.deploy(
         NAME,
         TOKEN_TICKER,
@@ -41,5 +42,18 @@ def token(alice):
     weth._mint_for_testing(alice, 1_000_000 * 10 ** weth.decimals())
     alice_weth_balance = weth.balanceOf(alice)
     assert alice_weth_balance > 0
-    print("alice weth balance: ", alice_weth_balance)
     return weth
+
+
+@pytest.fixture(scope="module")
+def deployed_oracle_with_bounty(deployed_oracle, alice, token):
+    _amount = 100 * 10 ** token.decimals()
+    token.approve(deployed_oracle, _amount, {"from": alice})
+    deployed_oracle.deposit_bounty(token.address, _amount, {"from": alice})
+    contract_weth_balance = token.balanceOf(deployed_oracle.address)
+    assert token.balanceOf(contract_weth_balance) > 0
+
+
+@pytest.fixture(autouse=True)
+def isolate(fn_isolation):
+    pass
