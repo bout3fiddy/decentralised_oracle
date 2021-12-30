@@ -23,7 +23,7 @@ def charlie(accounts):
 
 @pytest.fixture(scope="module")
 def deployed_oracle(decentralised_oracle, alice):
-    oracle = decentralised_oracle.deploy(
+    yield decentralised_oracle.deploy(
         NAME,
         TOKEN_TICKER,
         CVXCRV_F_POOL,
@@ -33,8 +33,6 @@ def deployed_oracle(decentralised_oracle, alice):
         {"from": alice},
     )
 
-    return oracle
-
 
 @pytest.fixture(scope="module")
 def token(alice):
@@ -42,7 +40,7 @@ def token(alice):
     weth._mint_for_testing(alice, 1_000_000 * 10 ** weth.decimals())
     alice_weth_balance = weth.balanceOf(alice)
     assert alice_weth_balance > 0
-    return weth
+    yield weth
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +49,8 @@ def deployed_oracle_with_bounty(deployed_oracle, alice, token):
     token.approve(deployed_oracle, _amount, {"from": alice})
     deployed_oracle.deposit_bounty(token.address, _amount, {"from": alice})
     contract_weth_balance = token.balanceOf(deployed_oracle.address)
-    assert token.balanceOf(contract_weth_balance) > 0
+    assert contract_weth_balance > 0
+    yield deployed_oracle
 
 
 @pytest.fixture(autouse=True)

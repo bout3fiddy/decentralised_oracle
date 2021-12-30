@@ -110,7 +110,7 @@ def __init__(
     self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
     self.chainlink_price = _init_chainlink_price * 10**10
     self.latest_oracle_price = _init_chainlink_price
-    self.average_swap_rate = 1000000000000000000  # 1E18
+    self.average_swap_rate = 10 ** 18 # 1E18
     self.oracle_update_epoch = 0  # keeping it zero so oracle update can be called without waiting
 
     self.filled_indices = 0
