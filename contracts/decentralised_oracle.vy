@@ -60,7 +60,7 @@ WETH_ADDRESS: constant(address) = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 DEFAULT_REWARD_RATE: constant(uint256) = 0
 DEFAULT_SWAP_QUANTITY: constant(uint256) = 1000000000000000000000
 MAX_STORED_RATES: constant(uint256) = 100
-DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: constant(int128) = 86400
+DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: constant(int128) = 3600
 
 admin: public(address)
 transfer_ownership_deadline: public(uint256)
@@ -108,7 +108,7 @@ def __init__(
     self.chainlink_oracle = _chainlink_oracle
     self.swap_quantity = DEFAULT_SWAP_QUANTITY
     self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
-    self.chainlink_price = _init_chainlink_price
+    self.chainlink_price = _init_chainlink_price * 10**10
     self.latest_oracle_price = _init_chainlink_price
     self.average_swap_rate = 1000000000000000000  # 1E18
     self.oracle_update_epoch = 0  # keeping it zero so oracle update can be called without waiting
@@ -117,15 +117,13 @@ def __init__(
     self.append_to_index = 0
 
 
-# deposit and update bounty rates
+# deposit bounty
 @external
-@nonreentrant('lock')
 def deposit_bounty(_token_address: address, _amount: uint256):
 
-    assert not self.is_paused  # cannot deposit if paused
-    assert _token_address == WETH_ADDRESS  # can only deposit weth
+    assert not self.is_paused  # dev: cannot deposit if paused
+    assert _token_address == WETH_ADDRESS  # dev: can only deposit weth
     assert _amount > 0
-
     assert ERC20(_token_address).transferFrom(msg.sender, self, _amount)
 
     log DepositBounty(msg.sender, _amount)
@@ -181,14 +179,9 @@ def _get_swap_rates():
         self.append_to_index = self.append_to_index + 1
 
 
-@external
-def update_oracle() -> uint256:
+@internal
+def _get_average_swap_rate() -> uint256:
 
-    # add logic for ensuring that the oracle does not get updated more than once every minute:
-    if block.timestamp - self.oracle_update_epoch > self.min_oracle_update_time_seconds:
-        return self.latest_oracle_price
-
-    # get swap rates array and average swap rate:
     self._get_swap_rates()
     _sum_swap_rates: uint256 = 0
     for i in range(MAX_STORED_RATES):
@@ -196,21 +189,38 @@ def update_oracle() -> uint256:
     
     self.average_swap_rate = _sum_swap_rates / self.filled_indices
 
+    return self.average_swap_rate
+
+
+@external
+def get_average_swap_rate() -> uint256:
+    return self._get_average_swap_rate()
+
+
+@external
+def update_oracle() -> uint256:
+
+    # add logic for ensuring that the oracle does not get updated more often than it should:
+    if block.timestamp - self.oracle_update_epoch > self.min_oracle_update_time_seconds:
+        return self.latest_oracle_price
+
+    # get average swap rate:   
+    self.average_swap_rate = self._get_average_swap_rate()
+
     # get and store chainlink price:
-    self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice()
+    self.chainlink_price = ChainlinkOracle(self.chainlink_oracle).getLatestPrice() * 10**10  # chainlink prices are in 8 decimals
     
     # oracle price is:
-    _latest_oracle_price: uint256 = self.chainlink_price * self.average_swap_rate
-    self.latest_oracle_price = _latest_oracle_price
+    self.latest_oracle_price = self.chainlink_price * self.average_swap_rate
 
     # update oracle epoch and log price
     self.oracle_update_epoch = block.timestamp
-    log OraclePriceUpdate(self.chainlink_price, self.average_swap_rate, _latest_oracle_price)
+    log OraclePriceUpdate(self.chainlink_price, self.average_swap_rate, self.latest_oracle_price)
 
     # reward bounty to oracle update caller
     self._reward_bounty(msg.sender)
 
-    return _latest_oracle_price
+    return self.latest_oracle_price
 
 
 @external
