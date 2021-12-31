@@ -34,25 +34,6 @@ def deployed_oracle(decentralised_oracle, alice):
     )
 
 
-@pytest.fixture(scope="module")
-def token(alice):
-    weth = MintableForkToken("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-    weth._mint_for_testing(alice, 1_000_000 * 10 ** weth.decimals())
-    alice_weth_balance = weth.balanceOf(alice)
-    assert alice_weth_balance > 0
-    yield weth
-
-
-@pytest.fixture(scope="module")
-def deployed_oracle_with_bounty(deployed_oracle, alice, token):
-    _amount = 100 * 10 ** token.decimals()
-    token.approve(deployed_oracle, _amount, {"from": alice})
-    deployed_oracle.deposit_bounty(token.address, _amount, {"from": alice})
-    contract_weth_balance = token.balanceOf(deployed_oracle.address)
-    assert contract_weth_balance > 0
-    yield deployed_oracle
-
-
 @pytest.fixture(autouse=True)
 def isolate(fn_isolation):
     pass

@@ -14,9 +14,8 @@ def test_chainlink_price(deployed_oracle, charlie):
 def test_update_oracle(deployed_oracle_with_bounty, charlie, token):
 
     chain.snapshot()
-    print(
-        f"timestamp: {brownie.web3.eth.getBlock(brownie.web3.eth.block_number).timestamp}"
-    )
+    current_block = brownie.web3.eth.get_block_number()
+    print(f"timestamp: {chain.time()}")
 
     filled_indices = deployed_oracle_with_bounty.filled_indices()
     print(f"filled indices: {filled_indices}")
@@ -25,7 +24,9 @@ def test_update_oracle(deployed_oracle_with_bounty, charlie, token):
     average_swap_rate = deployed_oracle_with_bounty.average_swap_rate()
     print(f"average_swap_rate: {average_swap_rate}")
 
-    tx = deployed_oracle_with_bounty.update_oracle({"from": charlie})
+    tx = deployed_oracle_with_bounty.update_oracle(
+        {"from": charlie}, block_identifier=chain.height
+    )
     initial_oracle_price = tx.return_value
 
     filled_indices = deployed_oracle_with_bounty.filled_indices()
