@@ -13,25 +13,10 @@ event OraclePriceUpdate:
     _ema_pool_swap_rate: uint256
     _oracle_price: uint256
 
-event UpdateSwapQuantity:
-    _new_quantity: uint256
-
-event UpdateOracleMinFrequency:
-    _old_freq: uint256
-    _new_freq: uint256
-
-
-MAX_AVERAGED_VALUES: constant(uint256) = 100
-DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS: constant(int128) = 3600
 
 name: public(String[32])
-token_ticker: public(String[32])
-admin: public(address)
-transfer_ownership_deadline: public(uint256)
-future_admin: public(address)
-is_paused: public(bool)
-curve_pool_address: public(address)
-chainlink_oracle: public(address)
+CURVE_POOL: constant(address) = 0x9D0464996170c6B9e75eED71c68B99dDEDf279e8
+CHAINLINK_ORACLE: constant(address) = 0xCd627aA160A6fA45Eb793D19Ef54f5062F20f33f
 
 averaged_indices: public(uint256)
 chainlink_price: public(uint256)
@@ -39,55 +24,14 @@ ema_swap_rate: public(uint256)
 latest_swap_rate: public(uint256)
 latest_oracle_price: public(uint256)
 oracle_update_epoch: public(uint256)
-min_oracle_update_time_seconds: public(uint256)
 
 
 @external
 def __init__(
     _name: String[32], 
-    _token_ticker: String[32], 
-    _curve_pool: address, 
-    _chainlink_oracle: address,
-    _init_chainlink_price: uint256,
-    _init_oracle_update_epoch: uint256
 ):
 
-    self.admin = msg.sender
     self.name = _name
-    self.is_paused = False
-    
-    # oracle settings
-    self.token_ticker = _token_ticker
-    self.curve_pool_address = _curve_pool
-    self.chainlink_oracle = _chainlink_oracle
-    self.chainlink_price = _init_chainlink_price
-    self.latest_oracle_price = _init_chainlink_price
-    self.latest_swap_rate = 10 ** 18
-    self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
-
-
-# code for calculating the oracle price of the curve pool asset
-@external
-def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: uint256) -> bool:
-
-    assert msg.sender == self.admin  # admin only2
-
-    log UpdateOracleMinFrequency(self.min_oracle_update_time_seconds, _new_oracle_update_min_freq_in_seconds)
-    self.min_oracle_update_time_seconds = _new_oracle_update_min_freq_in_seconds
-    
-    return True
-
-
-@internal
-def _get_swap_rate(quantity: uint256) -> uint256:
-
-    return StableSwap(self.curve_pool_address).get_dy(1, 0, quantity) * 10 ** 18 / quantity
-
-
-@external
-def get_swap_rate(quantity: uint256) -> uint256:
-
-    return self._get_swap_rate(quantity)
 
 
 @internal
@@ -100,7 +44,9 @@ def _get_averaged_swap_rate() -> uint256:
 
     _averaged_swap_rate: uint256 = 0
     for i in range(5):
-        _averaged_swap_rate += self._get_swap_rate(10 ** (18+i)) / 5
+        _quantity: uint256 = 10 ** (18+i)
+        _swap_rate: uint256 = StableSwap(CURVE_POOL).get_dy(1, 0, _quantity) * 10 ** 18 / _quantity
+        _averaged_swap_rate += _swap_rate / 5
 
     return _averaged_swap_rate
 
@@ -119,24 +65,18 @@ def _get_exponential_moving_average_rate() -> uint256:
     return self.ema_swap_rate
 
 
-@internal
-def _get_chainlink_price() -> uint256:
-
-    return ChainlinkOracle(self.chainlink_oracle).latestAnswer() * 10**10
-
-
 @external
 def update_oracle() -> uint256:
 
     # add logic for ensuring that the oracle does not get updated more often than it should:
-    if block.timestamp - self.oracle_update_epoch < self.min_oracle_update_time_seconds:
+    if block.timestamp - self.oracle_update_epoch < 3600:
         return self.latest_oracle_price
 
     # get exponential moving average swap rate:   
     self.ema_swap_rate = self._get_exponential_moving_average_rate()
 
     # get and store chainlink price:
-    self.chainlink_price = self._get_chainlink_price()
+    self.chainlink_price = ChainlinkOracle(CHAINLINK_ORACLE).latestAnswer() * 10**10
     
     # oracle price is:
     self.latest_oracle_price = self.chainlink_price * self.ema_swap_rate / 10 ** 18
@@ -145,10 +85,4 @@ def update_oracle() -> uint256:
     self.oracle_update_epoch = block.timestamp
     log OraclePriceUpdate(self.chainlink_price, self.ema_swap_rate, self.latest_oracle_price)
 
-    return self.latest_oracle_price
-
-
-@external
-@view
-def latestAnswer() -> uint256:
     return self.latest_oracle_price
