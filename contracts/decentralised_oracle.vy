@@ -1,7 +1,5 @@
 # @version 0.3.1
 
-from vyper.interfaces import ERC20
-
 
 interface StableSwap:
     def get_dy(i: int128, j: int128, dx: uint256) -> uint256: view
@@ -64,7 +62,6 @@ def __init__(
     self.chainlink_oracle = _chainlink_oracle
     self.chainlink_price = _init_chainlink_price
     self.latest_oracle_price = _init_chainlink_price
-    self.ema_swap_rate = 10 ** 18 # 1E18
     self.latest_swap_rate = 10 ** 18
     self.min_oracle_update_time_seconds = DEFAULT_MIN_ORACLE_UPDATE_IN_SECONDS
 
@@ -82,40 +79,42 @@ def set_min_oracle_update_frequency(_new_oracle_update_min_freq_in_seconds: uint
 
 
 @internal
-def _get_swap_rate() -> uint256:
+def _get_swap_rate(quantity: uint256) -> uint256:
+
+    return StableSwap(self.curve_pool_address).get_dy(1, 0, quantity) * 10 ** 18 / quantity
+
+
+@external
+def get_swap_rate(quantity: uint256) -> uint256:
+
+    return self._get_swap_rate(quantity)
+
+
+@internal
+def _get_averaged_swap_rate() -> uint256:
 
     # append cvxcrv:crv swap rate to swap_rates array. coin_index 0 is CRV, coin_index 1 is cvxCRV. 
     # We are interested in swaps from cvxCRV to CRV. We take averages for different swap quantities
     # as well.
     # multiply 10 ** 18 to the to numerator for easier handling of decimals
-    _swap_rate_1: uint256 = (
-        StableSwap(self.curve_pool_address).get_dy(1, 0, 10 ** 18) * 10 ** 18 / 10 ** 18
-    )
-    _swap_rate_10: uint256 = (
-        StableSwap(self.curve_pool_address).get_dy(1, 0, 10 * 10 ** 18) * 10 ** 18 / 10 ** 18
-    )
-    _swap_rate_100: uint256 = (
-        StableSwap(self.curve_pool_address).get_dy(1, 0, 100 * 10 ** 18) * 10 ** 18 / 10 ** 18
-    )
-    _swap_rate_1000: uint256 = (
-        StableSwap(self.curve_pool_address).get_dy(1, 0, 1000 * 10 ** 18) * 10 ** 18 / 10 ** 18
-    )
 
-    self.latest_swap_rate = (_swap_rate_1 + _swap_rate_10 + _swap_rate_100 + _swap_rate_1000) / 4
-    self.averaged_indices += 1   
+    _averaged_swap_rate: uint256 = 0
+    for i in range(5):
+        _averaged_swap_rate += self._get_swap_rate(10 ** (18+i)) / 5
 
-    return self.latest_swap_rate
+    return _averaged_swap_rate
 
 
 @internal
 def _get_exponential_moving_average_rate() -> uint256:
     # averaging logic: https://stackoverflow.com/a/23493727
 
-    _latest_swap_rate: uint256 = self._get_swap_rate()    
-    _average_swap_rate: uint256 = self.ema_swap_rate * (self.averaged_indices - 1) / self.averaged_indices
-    _average_swap_rate = _average_swap_rate + _latest_swap_rate / self.averaged_indices
+    self.latest_swap_rate = self._get_averaged_swap_rate()
+    self.averaged_indices += 1
 
-    self.ema_swap_rate = _average_swap_rate
+    self.ema_swap_rate = (
+        self.ema_swap_rate * (self.averaged_indices - 1) + self.latest_swap_rate
+    ) / self.averaged_indices
 
     return self.ema_swap_rate
 
