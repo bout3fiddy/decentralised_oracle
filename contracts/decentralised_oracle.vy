@@ -8,10 +8,9 @@ interface ChainlinkOracle:
     def latestAnswer() -> uint256: view
 
 
-event OraclePriceUpdate:
-    _chainlink_price: uint256
-    _ema_pool_swap_rate: uint256
-    _oracle_price: uint256
+event SwapRateUpdate:
+    _old_rate: uint256
+    _current_rate: uint256
 
 
 name: public(String[32])
@@ -36,35 +35,29 @@ def __init__(
 @internal
 def _get_exponential_moving_average_rate() -> uint256:
     # averaging logic: https://stackoverflow.com/a/23493727
-    # get swap rate for 1000 CRV to cvxCRV
-    self.latest_swap_rate = StableSwap(CURVE_POOL).get_dy(1, 0, 10 ** 21) * 10 ** 18 / 10 ** 21
+    # get swap rate for 1 cvxCRV to CRV
+    self.latest_swap_rate = StableSwap(CURVE_POOL).get_dy(1, 0, 10 ** 18) * 10 ** 18 / 10 ** 18
     self.averaged_indices += 1
 
     _ema_swap_rate: uint256 = (
         self.ema_swap_rate * (self.averaged_indices - 1) + self.latest_swap_rate
     ) / self.averaged_indices
 
+    log SwapRateUpdate(self.ema_swap_rate, _ema_swap_rate)
+    self.ema_swap_rate = _ema_swap_rate
+
     return _ema_swap_rate
 
 
 @external
-def update_oracle() -> uint256:
+def update_ema_rate():
 
-    # add logic for ensuring that the oracle does not get updated more often than it should:
-    if block.timestamp - self.oracle_update_epoch < 3600:
-        return self.latest_oracle_price
+    self._get_exponential_moving_average_rate()
 
-    # get exponential moving average swap rate:   
-    _ema_swap_rate: uint256 = self._get_exponential_moving_average_rate()
 
-    # get and store chainlink price:
+@external
+@view
+def latestAnswer() -> uint256:
+
     _chainlink_price: uint256 = ChainlinkOracle(CHAINLINK_ORACLE).latestAnswer() * 10**10
-    
-    # oracle price is:
-    self.latest_oracle_price = _chainlink_price * _ema_swap_rate / 10 ** 18
-
-    # update oracle epoch and log price
-    self.oracle_update_epoch = block.timestamp
-    log OraclePriceUpdate(_chainlink_price, _ema_swap_rate, self.latest_oracle_price)
-
-    return self.latest_oracle_price
+    return _chainlink_price * self.ema_swap_rate / 10 ** 18
