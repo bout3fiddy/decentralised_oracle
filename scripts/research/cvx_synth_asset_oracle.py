@@ -4,18 +4,20 @@ import brownie
 class ConvexSynthAssetOracle:
     swap_from_id: int = 1  # cvxAsset coin index in pool
     swap_to_id: int = 0
-    swap_quantity: int = 1E22  # get rates for 10000 cvxcrv
     ema_swap_rate: int = 0
     averaged_indices: int = 0
 
     def __init__(
             self,
             curve_pool: brownie.Contract,
-            chainlink_oracle: brownie.Contract
+            chainlink_oracle: brownie.Contract,
+            swap_quantity: int = 1E22  # get rates for 10000 cvxcrv
+
     ):
 
         self.curve_pool: brownie.Contract = curve_pool
         self.chainlink_oracle: brownie.Contract = chainlink_oracle
+        self.swap_quantity = swap_quantity
 
     def update_ema_rate(self):
         # averaging logic: https://stackoverflow.com/a/23493727
