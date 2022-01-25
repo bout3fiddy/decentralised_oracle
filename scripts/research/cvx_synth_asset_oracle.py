@@ -1,4 +1,30 @@
+from abc import abstractmethod
+
 import brownie
+
+
+class SyntheticOracle:
+    dampened_rate: int = 0
+    averaged_indices: int = 0
+
+    @abstractmethod
+    def latestAnswer(self, external_oracle_price: int) -> int:
+        """External Oracle is an established of the oracle the derivative
+        asset is being swapped into.
+
+        :param external_oracle_price:
+        :return:
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_dampened_rate(self, swap_rate: int):
+        """Calculate a dampened swap rate from derivative to source asset
+
+        :param swap_rate:
+        :return:
+        """
+        raise NotImplementedError
 
 
 class ConvexSynthAssetOracle:
@@ -48,29 +74,43 @@ class ConvexSynthAssetOracle:
 
 
 # this version does not do any contract calls:
-class ConvexSynthAssetOracleLite:
-    ema_swap_rate: int = 0
-    averaged_indices: int = 0
+class EMARateOracle(SyntheticOracle):
 
-    def update_ema_rate(self, _latest_swap_rate: int):
+    def update_dampened_rate(self, swap_rate: int):
         # averaging logic: https://stackoverflow.com/a/23493727
-        # get swap rate for 1 cvxCRV to CRV
 
         self.averaged_indices += 1
-        self.ema_swap_rate = int(
+        self.dampened_rate = int(
             (
-                    self.ema_swap_rate *
+                    self.dampened_rate *
                     (self.averaged_indices - 1) +
-                    _latest_swap_rate
+                    swap_rate
             ) / self.averaged_indices
         )
 
-    def latestAnswer(self, chainlink_oracle_price: int) -> int:
+    def latestAnswer(self, external_oracle_price: int) -> int:
 
         return int(
-            chainlink_oracle_price * 10**10 * self.ema_swap_rate / 10 ** 18
+            external_oracle_price * 10**10 * self.dampened_rate / 10 ** 18
         )
 
-    def get_latest_cvxAsset_price(self, chainlink_oracle_price: int) -> float:
 
-        return self.latestAnswer(chainlink_oracle_price) / 1E18
+class SlidingWindowEMAOracle(SyntheticOracle):
+
+    def __init__(self, num_blocks_in_window: int, initial_dampened_rate: int):
+
+        self.alpha = int(2 / (num_blocks_in_window + 1) * 1E18)
+        self.dampened_rate = initial_dampened_rate
+
+    def update_dampened_rate(self, swap_rate: int):
+
+        self.dampened_rate = int(
+            self.alpha * swap_rate + (1E18 - self.alpha) * self.dampened_rate
+        )
+
+    def latestAnswer(self, external_oracle_price: int) -> int:
+
+        return int(
+            external_oracle_price * 10**10 * self.dampened_rate / 10 ** 18
+        )
+
